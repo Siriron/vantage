@@ -1,0 +1,162 @@
+:root {
+  --ink: #1c1b1a;
+  --paper: #f2ede4;
+  --paper-dim: #e8e1d3;
+  --hazard: #c24c2b;
+  --compliant: #3f5d4a;
+  --grey: #8a8378;
+  --rule: #cabfa9;
+  --font-display: 'Archivo Narrow', 'Arial Narrow', sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  font-family: inherit;
+}
+
+.container {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.rule {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 24px 0;
+}
+
+.label {
+  color: var(--grey);
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+.num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--ink);
+  font-size: 12px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.status-pill.compliant {
+  border-color: var(--compliant);
+  color: var(--compliant);
+}
+
+.status-pill.breach {
+  border-color: var(--hazard);
+  color: var(--hazard);
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.btn {
+  background: var(--ink);
+  color: var(--paper);
+  border: none;
+  padding: 10px 18px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+}
+
+.btn:hover {
+  opacity: 0.85;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.field label {
+  font-size: 13px;
+  color: var(--grey);
+}
+
+.field input,
+.field select,
+.field textarea {
+  background: var(--paper-dim);
+  border: 1px solid var(--rule);
+  padding: 8px 10px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.ledger-margin {
+  border-left: 3px solid var(--ink);
+  padding-left: 16px;
+}
+
+@media (max-width: 600px) {
+  .container {
+    padding: 0 16px;
+  }
+}
