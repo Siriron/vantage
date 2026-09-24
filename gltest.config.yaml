@@ -1,0 +1,4 @@
+networks:
+  default: studionet
+  studionet:
+    default_wait_retries: 120
