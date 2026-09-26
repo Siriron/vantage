@@ -30,13 +30,18 @@ export function RegisterEventForm({ onRegistered }: Props) {
     setSubmitting(true);
     try {
       const value = BigInt(Math.round(parseFloat(bond) * 1e18));
-      const { receipt } = await write(
+      const { returnValue } = await write(
         'register_event',
         [venueName.trim(), dateLabel.trim(), startUnix, parseInt(capacity, 10)],
         value
       );
-      const eventId = (receipt as any)?.returnValue ?? '';
-      onRegistered(typeof eventId === 'string' ? eventId : '');
+      const eventId = typeof returnValue === 'string' ? returnValue : '';
+      if (!eventId) {
+        setError(
+          'Registered successfully, but the new event ID could not be read automatically. Check the explorer for your transaction and use "Find an event" with the ID shown there.'
+        );
+      }
+      onRegistered(eventId);
     } catch (err: any) {
       setError(err?.message ?? 'Registration failed.');
     } finally {

@@ -29,10 +29,11 @@ export function EvidenceForm({ incidentId, account, onSubmitted }: Props) {
   const { write } = useGenLayer();
   const [family, setFamily] = useState<string>(SOURCE_FAMILIES[0]);
   const [url, setUrl] = useState('');
-  const [phase, setPhase] = useState<'commit' | 'reveal'>('commit');
+  const [phase, setPhase] = useState<'commit' | 'manual-id' | 'reveal'>('commit');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [evidenceId, setEvidenceId] = useState('');
+  const [pendingSecret, setPendingSecret] = useState<{ family: string; url: string; salt: string } | null>(null);
 
   async function handleCommit(e: React.FormEvent) {
     e.preventDefault();
@@ -45,22 +46,39 @@ export function EvidenceForm({ incidentId, account, onSubmitted }: Props) {
     try {
       const salt = randomSalt();
       const commitment = await sha256Hex(`${incidentId}|${account.toLowerCase()}|${family}|${url}|${salt}`);
-      const { receipt } = await write('commit_evidence', [incidentId, commitment], BigInt(10 ** 14));
-      const newEvidenceId = (receipt as any)?.returnValue ?? '';
-      // Persist the reveal secret locally — only this browser/wallet can
-      // reveal, and losing it forfeits the small evidence bond, same as
-      // any commit-reveal scheme.
-      window.localStorage.setItem(
-        PENDING_KEY_PREFIX + newEvidenceId,
-        JSON.stringify({ family, url, salt })
-      );
-      setEvidenceId(typeof newEvidenceId === 'string' ? newEvidenceId : '');
-      setPhase('reveal');
+      const { returnValue } = await write('commit_evidence', [incidentId, commitment], BigInt(10 ** 14));
+      const newEvidenceId = typeof returnValue === 'string' ? returnValue : '';
+      if (newEvidenceId) {
+        // Persist the reveal secret locally, keyed by the confirmed
+        // evidence ID — only this browser/wallet can reveal, and losing
+        // it before revealing forfeits the small evidence bond.
+        window.localStorage.setItem(
+          PENDING_KEY_PREFIX + newEvidenceId,
+          JSON.stringify({ family, url, salt })
+        );
+        setEvidenceId(newEvidenceId);
+        setPhase('reveal');
+      } else {
+        // The return value couldn't be read automatically from the
+        // transaction receipt. Still save the reveal secret under a
+        // manually-entered ID so nothing is lost — check the explorer
+        // for the transaction's return value, or the incident's
+        // evidence_count on-chain, to find the right ID.
+        setPendingSecret({ family, url, salt });
+        setPhase('manual-id');
+      }
     } catch (err: any) {
       setError(err?.message ?? 'Commit failed.');
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function handleManualIdSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pendingSecret) return;
+    window.localStorage.setItem(PENDING_KEY_PREFIX + evidenceId, JSON.stringify(pendingSecret));
+    setPhase('reveal');
   }
 
   async function handleReveal(e: React.FormEvent) {
@@ -80,6 +98,26 @@ export function EvidenceForm({ incidentId, account, onSubmitted }: Props) {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (phase === 'manual-id') {
+    return (
+      <form onSubmit={handleManualIdSubmit}>
+        <p style={{ fontSize: 14 }}>
+          Your evidence was committed successfully, but this browser couldn&apos;t automatically read the new
+          evidence ID from the transaction. Find it on the explorer (look for the <code>commit_evidence</code>{' '}
+          transaction&apos;s return value, or the incident&apos;s evidence count) and enter it here so you can
+          reveal it.
+        </p>
+        <div className="field">
+          <label>Evidence ID</label>
+          <input value={evidenceId} onChange={(e) => setEvidenceId(e.target.value)} placeholder="vg-ev-item-1" />
+        </div>
+        <button className="btn" type="submit" disabled={!evidenceId.trim()}>
+          Continue to reveal
+        </button>
+      </form>
+    );
   }
 
   if (phase === 'reveal') {
