@@ -117,13 +117,40 @@ export function useGenLayer() {
         value,
       });
       try {
-        const receipt = await client.waitForTransactionReceipt({
+        const receipt: any = await client.waitForTransactionReceipt({
           hash,
           status: TransactionStatus.ACCEPTED,
           retries: 120,
           interval: 4000,
         });
-        return { hash, receipt };
+        // The contract's return value (e.g. a newly created ID) lives on
+        // the leader receipt, not as a top-level field on the tx receipt.
+        // Confirmed by reading genlayer-js's own simplifyTransactionReceipt
+        // source (dist/index.js) rather than assumed: the simplified
+        // receipt's consensus_data.leader_receipt[0].result carries it.
+        // Extract it defensively — if the wire shape differs from what
+        // was confirmed there, callers fall back to a null returnValue
+        // and re-read state instead of trusting a guessed field name.
+        let returnValue: string | null = null;
+        try {
+          const leaderReceipt = receipt?.consensus_data?.leader_receipt;
+          const first = Array.isArray(leaderReceipt) ? leaderReceipt[0] : leaderReceipt;
+          const raw = first?.result;
+          if (typeof raw === 'string') {
+            // raw may already be plain text, or may need JSON parsing if
+            // the contract's return was JSON-encoded.
+            try {
+              returnValue = JSON.parse(raw);
+            } catch {
+              returnValue = raw;
+            }
+          } else if (raw !== undefined && raw !== null) {
+            returnValue = raw;
+          }
+        } catch {
+          returnValue = null;
+        }
+        return { hash, receipt, returnValue };
       } catch (err) {
         throw new TimeoutError(hash as unknown as string);
       }
