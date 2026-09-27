@@ -123,6 +123,10 @@ export function useGenLayer() {
           retries: 120,
           interval: 4000,
         });
+        // TEMPORARY DEBUG — remove once the return-value extraction bug
+        // is confirmed fixed. Logs the real receipt shape so it can be
+        // read from the browser console instead of guessed at.
+        console.log('[vantage-debug] full receipt:', JSON.stringify(receipt, null, 2));
         // The contract's return value (e.g. a newly created ID) lives on
         // the leader receipt, not as a top-level field on the tx receipt.
         // Confirmed by reading genlayer-js's own simplifyTransactionReceipt
