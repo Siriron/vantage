@@ -13,6 +13,10 @@ CAPACITY = 1000
 VENUE = "Riverside Arena"
 DATE_LABEL = "2027-03-01"
 SALT = "abcdefgh"
+TICKET_HOST = "tickets.example.com"
+VENUE_HOST = "venue.example.org"
+GOV_URL = "https://reports.safety.gov/test-arena-report"
+FILING_BOND = 10 ** 15
 
 ORGANIZER = bytes.fromhex("11" * 20)
 COMPLAINANT = bytes.fromhex("22" * 20)
@@ -73,22 +77,30 @@ def event(direct_vm, direct_deploy):
     contract = direct_deploy(CONTRACT)
     direct_vm.sender = ORGANIZER
     direct_vm.value = BOND
-    event_id = contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY)
+    event_id = contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY, TICKET_HOST, VENUE_HOST)
     direct_vm.value = 0
     return contract, event_id
+
+
+def file_incident(contract, direct_vm, event_id, sender=COMPLAINANT, value=FILING_BOND, window=900):
+    direct_vm.sender = sender
+    direct_vm.value = value
+    try:
+        return contract.open_incident(event_id, "Reported overcrowding at entrance gates", window)
+    finally:
+        direct_vm.value = 0
 
 
 @pytest.fixture
 def incident(event, direct_vm):
     contract, event_id = event
     warp(direct_vm, NOW + 7200)
-    direct_vm.sender = COMPLAINANT
-    incident_id = contract.open_incident(event_id, "Reported overcrowding at entrance gates", 900)
+    incident_id = file_incident(contract, direct_vm, event_id)
     return contract, event_id, incident_id
 
 
 def reveal_flow(contract, direct_vm, incident_id, submitter,
-                 family="SAFETY_AUTHORITY", url="https://authority.test/report", salt=SALT):
+                 family="SAFETY_AUTHORITY", url=GOV_URL, salt=SALT):
     submitter_hex = as_hex(submitter)
     c = commitment(incident_id, submitter_hex, family, url, salt)
     warp(direct_vm, NOW + 7200 + 100)  # commit early, well within the 900s window
@@ -108,7 +120,7 @@ def test_register_event_stores_record(direct_vm, direct_deploy):
     contract = direct_deploy(CONTRACT)
     direct_vm.sender = ORGANIZER
     direct_vm.value = BOND
-    event_id = contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY)
+    event_id = contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY, TICKET_HOST, VENUE_HOST)
     direct_vm.value = 0
     rec = contract.get_event(event_id)
     assert rec["venue_name"] == VENUE
@@ -122,7 +134,7 @@ def test_register_event_rejects_past_start(direct_vm, direct_deploy):
     direct_vm.sender = ORGANIZER
     direct_vm.value = BOND
     with pytest.raises(Exception, match="event start must be in the future"):
-        contract.register_event(VENUE, DATE_LABEL, NOW - 100, CAPACITY)
+        contract.register_event(VENUE, DATE_LABEL, NOW - 100, CAPACITY, TICKET_HOST, VENUE_HOST)
     direct_vm.value = 0
 
 
@@ -132,23 +144,21 @@ def test_register_event_rejects_bond_out_of_range(direct_vm, direct_deploy):
     direct_vm.sender = ORGANIZER
     direct_vm.value = 1
     with pytest.raises(Exception, match="bond out of range"):
-        contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY)
+        contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY, TICKET_HOST, VENUE_HOST)
     direct_vm.value = 0
 
 
 def test_open_incident_rejects_before_event_start(event, direct_vm):
     contract, event_id = event
     warp(direct_vm, NOW + 10)
-    direct_vm.sender = COMPLAINANT
     with pytest.raises(Exception, match="event has not happened yet"):
-        contract.open_incident(event_id, "premature complaint", 900)
+        file_incident(contract, direct_vm, event_id)
 
 
 def test_open_incident_rejects_second_concurrent_incident(incident, direct_vm):
     contract, event_id, incident_id = incident
-    direct_vm.sender = COMPLAINANT
     with pytest.raises(Exception, match="another incident is already open"):
-        contract.open_incident(event_id, "second complaint", 900)
+        file_incident(contract, direct_vm, event_id)
 
 
 def test_unknown_event_reverts(direct_vm, direct_deploy):
@@ -445,7 +455,7 @@ def test_validator_rejects_leader_that_errored(incident, direct_vm):
     assert direct_vm.run_validator(leader_error=Exception("llm_non_dict_response")) is False
 
 
-def test_incident_validator_tolerates_one_adjacent_rung(incident, direct_vm):
+def test_incident_validator_rejects_even_one_adjacent_rung(incident, direct_vm):
     contract, event_id, incident_id = incident
     submitter = bytes.fromhex("b7" * 20)
     mock_source(direct_vm)
@@ -457,7 +467,7 @@ def test_incident_validator_tolerates_one_adjacent_rung(incident, direct_vm):
     contract.resolve_incident(incident_id)
     direct_vm.clear_mocks()
     mock_llm(direct_vm, incident_result(consensus_occupancy=1200))
-    assert direct_vm.run_validator() is True
+    assert direct_vm.run_validator() is False  # mild vs moderate carry different slashes
 
 
 def test_incident_validator_rejects_wide_ladder_swing(incident, direct_vm):
@@ -483,3 +493,541 @@ def test_no_storage_object_crosses_into_nondet_closure(incident, direct_vm):
     mock_llm(direct_vm, source_result())
     reveal_flow(contract, direct_vm, incident_id, submitter)
     assert direct_vm.run_validator() is True
+
+
+# ================================================================ v2 safeguards (steward review, Sep 2026)
+
+def to_resolution(contract, direct_vm, incident_id, occupancy, submitter=None):
+    submitter = submitter or bytes.fromhex("d1" * 20)
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result(occupancy_figure=occupancy))
+    reveal_flow(contract, direct_vm, incident_id, submitter)
+    warp(direct_vm, NOW + 7200 + 900 + 900 + 1)
+    mock_llm(direct_vm, incident_result(consensus_occupancy=occupancy))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)
+
+
+# ---- 1. organizer bond stays locked through the challenge window
+def test_close_event_blocked_until_challenge_window_ends(event, direct_vm):
+    contract, event_id = event
+    direct_vm.sender = ORGANIZER
+    warp(direct_vm, NOW + 3600 + 60)  # event just started
+    with pytest.raises(Exception, match="bond is locked until the challenge window ends"):
+        contract.close_event(event_id)
+    warp(direct_vm, NOW + 3600 + 7 * 86400 - 5)  # one tick before the window ends
+    with pytest.raises(Exception, match="bond is locked until the challenge window ends"):
+        contract.close_event(event_id)
+
+
+def test_close_event_after_window_returns_exact_bond(event, direct_vm):
+    contract, event_id = event
+    direct_vm.sender = ORGANIZER
+    warp(direct_vm, NOW + 3600 + 7 * 86400 + 1)
+    contract.close_event(event_id)
+    assert int(contract.get_credit(as_hex(ORGANIZER))) == BOND
+    assert contract.get_stats()["accounting_balanced"] is True
+
+
+def test_close_event_blocked_by_open_incident(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    direct_vm.sender = ORGANIZER
+    warp(direct_vm, NOW + 3600 + 7 * 86400 + 1)
+    with pytest.raises(Exception, match="active incident blocks closing"):
+        contract.close_event(event_id)
+
+
+def test_incident_cannot_be_filed_after_challenge_window(event, direct_vm):
+    contract, event_id = event
+    warp(direct_vm, NOW + 3600 + 7 * 86400 + 1)
+    with pytest.raises(Exception, match="challenge window has ended"):
+        file_incident(contract, direct_vm, event_id)
+
+
+# ---- 2. self-filed incidents / self-submitted evidence cannot farm reputation
+def test_organizer_cannot_file_incident_on_own_event(event, direct_vm):
+    contract, event_id = event
+    warp(direct_vm, NOW + 7200)
+    with pytest.raises(Exception, match="organizer cannot file an incident against own event"):
+        file_incident(contract, direct_vm, event_id, sender=ORGANIZER)
+
+
+def test_organizer_cannot_submit_evidence_on_own_event(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    c = commitment(incident_id, as_hex(ORGANIZER), "SAFETY_AUTHORITY", GOV_URL)
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.sender = ORGANIZER
+    direct_vm.value = EVIDENCE_BOND
+    with pytest.raises(Exception, match="organizer cannot submit evidence on own event"):
+        contract.commit_evidence(incident_id, c)
+    direct_vm.value = 0
+
+
+def test_no_breach_never_raises_reputation(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    to_resolution(contract, direct_vm, incident_id, occupancy=5)
+    assert contract.get_incident(incident_id)["outcome"] == "no_breach"
+    assert int(contract.get_reputation(as_hex(ORGANIZER))["reputation"]) == 0
+
+
+@pytest.mark.parametrize("value", [0, FILING_BOND - 1, 10 ** 18 + 1])
+def test_filing_bond_out_of_range_rejected(event, direct_vm, value):
+    contract, event_id = event
+    warp(direct_vm, NOW + 7200)
+    with pytest.raises(Exception, match="filing bond out of range"):
+        file_incident(contract, direct_vm, event_id, value=value)
+
+
+def test_filing_bond_refunded_when_breach_upheld(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    to_resolution(contract, direct_vm, incident_id, occupancy=1500)
+    slash = BOND * 8000 // 10000
+    # complainant: 70% of the slash plus the filing bond back
+    assert int(contract.get_credit(as_hex(COMPLAINANT))) == slash * 7000 // 10000 + FILING_BOND
+    assert contract.get_stats()["accounting_balanced"] is True
+
+
+def test_filing_bond_forfeited_to_organizer_on_no_breach(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    to_resolution(contract, direct_vm, incident_id, occupancy=5)
+    assert int(contract.get_credit(as_hex(COMPLAINANT))) == 0
+    assert int(contract.get_credit(as_hex(ORGANIZER))) == FILING_BOND
+    assert contract.get_stats()["accounting_balanced"] is True
+
+
+def test_filing_bond_refunded_when_unverifiable(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    submitter = bytes.fromhex("d2" * 20)
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result())
+    reveal_flow(contract, direct_vm, incident_id, submitter)
+    warp(direct_vm, NOW + 7200 + 900 + 900 + 1)
+    mock_llm(direct_vm, incident_result(resolvable=False, consensus_occupancy=0,
+                                         basis="Verified sources conflict with no resolvable majority figure."))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)
+    assert int(contract.get_credit(as_hex(COMPLAINANT))) == FILING_BOND
+    assert int(contract.get_credit(as_hex(ORGANIZER))) == 0
+
+
+def test_filing_bond_refunded_when_incident_expires(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    warp(direct_vm, NOW + 7200 + 900 + 15 * 60 + 1)
+    contract.expire_incident(incident_id)
+    assert int(contract.get_credit(as_hex(COMPLAINANT))) == FILING_BOND
+    assert contract.get_stats()["accounting_balanced"] is True
+
+
+# ---- 3. evidence authentication (deterministic, before any LLM sees the URL)
+def reveal_expect_reject(contract, direct_vm, incident_id, family, url, match, submitter=None):
+    submitter = submitter or bytes.fromhex("e1" * 20)
+    c = commitment(incident_id, as_hex(submitter), family, url)
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.sender = submitter
+    direct_vm.value = EVIDENCE_BOND
+    evidence_id = contract.commit_evidence(incident_id, c)
+    direct_vm.value = 0
+    warp(direct_vm, NOW + 7200 + 160)
+    with pytest.raises(Exception, match=match):
+        contract.reveal_evidence(evidence_id, family, url, SALT)
+
+
+@pytest.mark.parametrize("url", [
+    "https://reports.safety.example.com/x",   # not a government domain
+    "https://gov.evil.com/report",             # 'gov' label in the wrong position
+    "https://safety.gov.evil.com/report",
+])
+def test_safety_authority_must_be_a_government_domain(incident, direct_vm, url):
+    contract, event_id, incident_id = incident
+    reveal_expect_reject(contract, direct_vm, incident_id, "SAFETY_AUTHORITY", url, "government domain")
+
+
+@pytest.mark.parametrize("url", [
+    "https://reports.safety.gov/x",
+    "https://fire.gov.uk/x",
+    "https://interieur.gouv.fr/x",
+])
+def test_government_domains_are_accepted(incident, direct_vm, url):
+    contract, event_id, incident_id = incident
+    submitter = bytes.fromhex("e2" * 20)
+    c = commitment(incident_id, as_hex(submitter), "SAFETY_AUTHORITY", url)
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.sender = submitter
+    direct_vm.value = EVIDENCE_BOND
+    evidence_id = contract.commit_evidence(incident_id, c)
+    direct_vm.value = 0
+    warp(direct_vm, NOW + 7200 + 160)
+    contract.reveal_evidence(evidence_id, "SAFETY_AUTHORITY", url, SALT)
+    assert contract.get_evidence(evidence_id)["status"] == "REVEALED"
+
+
+def test_ticketing_source_must_be_the_locked_ticketing_host(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    reveal_expect_reject(contract, direct_vm, incident_id, "TICKETING_PLATFORM",
+                         "https://other-seller.example.net/e/1", "ticketing host locked at registration")
+
+
+def test_venue_source_must_be_the_locked_venue_host(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    reveal_expect_reject(contract, direct_vm, incident_id, "VENUE_CERTIFICATE",
+                         "https://tickets.example.com/cert", "venue host locked at registration")
+
+
+def test_locked_host_and_its_subdomains_are_accepted(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    submitter = bytes.fromhex("e3" * 20)
+    url = "https://sales.tickets.example.com/e/1"
+    c = commitment(incident_id, as_hex(submitter), "TICKETING_PLATFORM", url)
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.sender = submitter
+    direct_vm.value = EVIDENCE_BOND
+    evidence_id = contract.commit_evidence(incident_id, c)
+    direct_vm.value = 0
+    warp(direct_vm, NOW + 7200 + 160)
+    contract.reveal_evidence(evidence_id, "TICKETING_PLATFORM", url, SALT)
+    assert contract.get_evidence(evidence_id)["status"] == "REVEALED"
+
+
+@pytest.mark.parametrize("url", [
+    "https://203.0.113.9/report",
+    "https://localhost/report",
+    "https://reports.safety.gov:8443/x",
+    "https://user:pw@reports.safety.gov/x",
+])
+def test_ip_local_port_and_credential_urls_rejected(incident, direct_vm, url):
+    contract, event_id, incident_id = incident
+    reveal_expect_reject(contract, direct_vm, incident_id, "SAFETY_AUTHORITY", url,
+                         "IP address|local host|credentials")
+
+
+def test_press_family_no_longer_exists(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    reveal_expect_reject(contract, direct_vm, incident_id, "INDEPENDENT_PRESS",
+                         "https://news.example.com/a", "unknown source family")
+
+
+# ---- 4. evidence deduplication
+def test_same_source_cannot_be_accepted_twice_for_one_incident(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    first, second = bytes.fromhex("f1" * 20), bytes.fromhex("f2" * 20)
+    url_a = "https://reports.safety.gov/Report/"
+    url_b = "https://Reports.Safety.GOV/Report#section-2"  # same canonical source: host case, fragment, trailing slash
+    ca = commitment(incident_id, as_hex(first), "SAFETY_AUTHORITY", url_a)
+    cb = commitment(incident_id, as_hex(second), "SAFETY_AUTHORITY", url_b)
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.value = EVIDENCE_BOND
+    direct_vm.sender = first
+    ev_a = contract.commit_evidence(incident_id, ca)
+    direct_vm.sender = second
+    ev_b = contract.commit_evidence(incident_id, cb)
+    direct_vm.value = 0
+    warp(direct_vm, NOW + 7200 + 160)
+    direct_vm.sender = first
+    contract.reveal_evidence(ev_a, "SAFETY_AUTHORITY", url_a, SALT)
+    direct_vm.sender = second
+    with pytest.raises(Exception, match="already submitted for this incident"):
+        contract.reveal_evidence(ev_b, "SAFETY_AUTHORITY", url_b, SALT)
+
+
+def test_same_source_is_allowed_on_a_different_incident(event, direct_vm):
+    contract, event_id = event
+    warp(direct_vm, NOW + 7200)
+    first_incident = file_incident(contract, direct_vm, event_id)
+    submitter = bytes.fromhex("f3" * 20)
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result(occupancy_figure=5))
+    reveal_flow(contract, direct_vm, first_incident, submitter)
+    warp(direct_vm, NOW + 7200 + 900 + 900 + 1)
+    mock_llm(direct_vm, incident_result(consensus_occupancy=5))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(first_incident)
+    second_incident = file_incident(contract, direct_vm, event_id)
+    warp(direct_vm, NOW + 7200 + 900 + 900 + 1 + 100)
+    c = commitment(second_incident, as_hex(submitter), "SAFETY_AUTHORITY", GOV_URL)
+    direct_vm.sender = submitter
+    direct_vm.value = EVIDENCE_BOND
+    ev = contract.commit_evidence(second_incident, c)
+    direct_vm.value = 0
+    warp(direct_vm, NOW + 7200 + 900 + 900 + 1 + 160)
+    contract.reveal_evidence(ev, "SAFETY_AUTHORITY", GOV_URL, SALT)
+    assert contract.get_evidence(ev)["status"] == "REVEALED"
+
+
+# ---- 5. the slash really leaves the organizer; protocol pool is treasury-only
+def test_protocol_share_never_returns_to_organizer(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    to_resolution(contract, direct_vm, incident_id, occupancy=1500)
+    slash = BOND * 8000 // 10000
+    complainant_share = slash * 7000 // 10000
+    stats = contract.get_stats()
+    assert int(stats["protocol_pool_atto"]) == slash - complainant_share
+    assert int(contract.get_credit(as_hex(ORGANIZER))) == 0
+    assert stats["accounting_balanced"] is True
+
+
+def test_only_treasury_can_claim_protocol_pool(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    to_resolution(contract, direct_vm, incident_id, occupancy=1500)
+    pool = int(contract.get_stats()["protocol_pool_atto"])
+    assert pool > 0
+    direct_vm.sender = COMPLAINANT
+    with pytest.raises(Exception, match="only the treasury can claim the protocol pool"):
+        contract.claim_protocol_pool()
+    direct_vm.sender = ORGANIZER
+    with pytest.raises(Exception, match="only the treasury can claim the protocol pool"):
+        contract.claim_protocol_pool()
+    treasury = bytes.fromhex(contract.get_stats()["treasury"][2:])
+    direct_vm.sender = treasury
+    out = json.loads(contract.claim_protocol_pool())
+    assert int(out["claimed"]) == pool
+    assert int(contract.get_stats()["protocol_pool_atto"]) == 0
+    assert contract.get_stats()["accounting_balanced"] is True
+
+
+def test_empty_protocol_pool_cannot_be_claimed(event, direct_vm):
+    contract, event_id = event
+    treasury = bytes.fromhex(contract.get_stats()["treasury"][2:])
+    direct_vm.sender = treasury
+    with pytest.raises(Exception, match="protocol pool is empty"):
+        contract.claim_protocol_pool()
+
+
+# ---- 6. validators must agree exactly on the financially meaningful outcome
+@pytest.mark.parametrize("leader_occ,validator_occ", [
+    (1050, 1200),   # mild vs moderate
+    (1200, 1500),   # moderate vs severe
+    (900, 1050),    # no_breach vs mild
+])
+def test_validator_requires_exact_outcome_agreement(incident, direct_vm, leader_occ, validator_occ):
+    contract, event_id, incident_id = incident
+    submitter = bytes.fromhex("a9" * 20)
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result(occupancy_figure=leader_occ))
+    reveal_flow(contract, direct_vm, incident_id, submitter)
+    warp(direct_vm, NOW + 7200 + 900 + 900 + 1)
+    mock_llm(direct_vm, incident_result(consensus_occupancy=leader_occ))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)
+    direct_vm.clear_mocks()
+    mock_llm(direct_vm, incident_result(consensus_occupancy=validator_occ))
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_accepts_same_bucket_with_different_raw_figure(incident, direct_vm):
+    """Two government sources report 1120 and 1180 (both moderate_overage). The leader adjudicates
+    one of them and the validator the other: same rung, so they agree."""
+    contract, event_id, incident_id = incident
+    direct_vm.clear_mocks()
+    mock_source(direct_vm)
+    direct_vm.mock_llm(r"(?s).*source URL: https://reports\.safety\.gov/test-arena-report.*",
+                       json.dumps(source_result(occupancy_figure=1120)))
+    direct_vm.mock_llm(r"(?s).*source URL: https://other\.safety\.gov/r.*",
+                       json.dumps(source_result(occupancy_figure=1180)))
+    commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("aa" * 20), "SAFETY_AUTHORITY", GOV_URL)
+    commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("ab" * 20), "SAFETY_AUTHORITY", "https://other.safety.gov/r")
+    warp(direct_vm, RESOLVE_READY)
+    direct_vm.clear_mocks()
+    mock_llm(direct_vm, incident_result(consensus_occupancy=1120))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)
+    direct_vm.clear_mocks()
+    mock_llm(direct_vm, incident_result(consensus_occupancy=1180))
+    assert direct_vm.run_validator() is True
+
+
+# ---- 7. IDs are discoverable per creator without decoding any transaction receipt
+def test_last_event_is_tracked_per_creator(direct_vm, direct_deploy):
+    warp(direct_vm, NOW)
+    contract = direct_deploy(CONTRACT)
+    other = bytes.fromhex("77" * 20)
+    direct_vm.value = BOND
+    direct_vm.sender = ORGANIZER
+    first = contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY, TICKET_HOST, VENUE_HOST)
+    direct_vm.sender = other
+    contract.register_event(VENUE, DATE_LABEL, NOW + 3600, CAPACITY, TICKET_HOST, VENUE_HOST)
+    direct_vm.value = 0
+    assert contract.get_last_event(as_hex(ORGANIZER)) == first            # not "latest global id"
+    assert contract.get_last_event(as_hex(ORGANIZER).upper().replace("0X", "0x")) == first
+    assert contract.get_last_event(as_hex(bytes.fromhex("99" * 20))) == ""
+
+
+def test_last_evidence_is_tracked_per_submitter_and_incident(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    a, b = bytes.fromhex("c7" * 20), bytes.fromhex("c8" * 20)
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.value = EVIDENCE_BOND
+    direct_vm.sender = a
+    ev_a = contract.commit_evidence(incident_id, commitment(incident_id, as_hex(a), "SAFETY_AUTHORITY", GOV_URL))
+    direct_vm.sender = b
+    ev_b = contract.commit_evidence(incident_id, commitment(incident_id, as_hex(b), "SAFETY_AUTHORITY", "https://x.safety.gov/1"))
+    direct_vm.value = 0
+    assert contract.get_last_evidence(as_hex(a), incident_id) == ev_a
+    assert contract.get_last_evidence(as_hex(b), incident_id) == ev_b
+    assert contract.get_last_evidence(as_hex(a), "vg-in-999") == ""
+
+
+# ================================================================ red-team pass (pre-resubmission)
+
+TICKET_URL = "https://tickets.example.com/e/test-arena"
+
+
+def commit_and_reveal(contract, direct_vm, incident_id, submitter, family, url, examine=True):
+    c = commitment(incident_id, as_hex(submitter), family, url)
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.sender = submitter
+    direct_vm.value = EVIDENCE_BOND
+    ev = contract.commit_evidence(incident_id, c)
+    direct_vm.value = 0
+    warp(direct_vm, NOW + 7200 + 160)
+    contract.reveal_evidence(ev, family, url, SALT)
+    if examine:
+        contract.examine_source(ev)
+    return ev
+
+
+def mock_by_family(vm, authority_fig, ticketing_fig):
+    vm.clear_mocks()
+    mock_source(vm)
+    vm.mock_llm(r"(?s).*declared source family: SAFETY_AUTHORITY.*", json.dumps(source_result(occupancy_figure=authority_fig)))
+    vm.mock_llm(r"(?s).*declared source family: TICKETING_PLATFORM.*", json.dumps(source_result(occupancy_figure=ticketing_fig)))
+
+
+RESOLVE_READY = NOW + 7200 + 900 + 900 + 1
+
+
+# ---- A. the model cannot invent a figure the verified sources never reported
+def test_resolve_rejects_a_figure_outside_the_verified_range(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result(occupancy_figure=1500))
+    reveal_flow(contract, direct_vm, incident_id, bytes.fromhex("b1" * 20))
+    warp(direct_vm, RESOLVE_READY)
+    mock_llm(direct_vm, incident_result(consensus_occupancy=9000))   # invented, far above the only verified figure
+    direct_vm.sender = COMPLAINANT
+    with pytest.raises(Exception, match="outside the verified range"):
+        contract.resolve_incident(incident_id)
+    assert contract.get_incident(incident_id)["status"] == "OPEN"
+
+
+def test_validator_rejects_a_leader_figure_outside_the_verified_range(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result(occupancy_figure=1500))
+    reveal_flow(contract, direct_vm, incident_id, bytes.fromhex("b2" * 20))
+    warp(direct_vm, RESOLVE_READY)
+    mock_llm(direct_vm, incident_result(consensus_occupancy=1500))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)
+    assert direct_vm.run_validator(leader_result=incident_result(consensus_occupancy=9000)) is False
+
+
+def test_verified_sources_without_any_figure_resolve_unverifiable_without_the_model(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result(reports_figure=False, occupancy_figure=0))
+    reveal_flow(contract, direct_vm, incident_id, bytes.fromhex("b3" * 20))
+    warp(direct_vm, RESOLVE_READY)
+    direct_vm.clear_mocks()   # no model mock: any attempt to call the model would fail
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)
+    rec = contract.get_incident(incident_id)
+    assert rec["outcome"] == "unverifiable" and rec["slash_bps"] == "0"
+    assert int(contract.get_credit(as_hex(COMPLAINANT))) == FILING_BOND
+
+
+# ---- B. an incident cannot be settled around evidence that was revealed but not yet examined
+def test_resolve_blocked_while_revealed_evidence_is_unexamined(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    mock_source(direct_vm)
+    mock_llm(direct_vm, source_result(occupancy_figure=1500))
+    reveal_flow(contract, direct_vm, incident_id, bytes.fromhex("b4" * 20))                       # examined
+    commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("b5" * 20),
+                      "SAFETY_AUTHORITY", "https://other.safety.gov/r", examine=False)            # revealed only
+    warp(direct_vm, RESOLVE_READY)
+    mock_llm(direct_vm, incident_result(consensus_occupancy=1500))
+    direct_vm.sender = COMPLAINANT
+    with pytest.raises(Exception, match="unexamined evidence"):
+        contract.resolve_incident(incident_id)
+
+
+def test_expire_blocked_while_revealed_evidence_is_unexamined(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("b6" * 20),
+                      "SAFETY_AUTHORITY", GOV_URL, examine=False)
+    warp(direct_vm, RESOLVE_READY)
+    with pytest.raises(Exception, match="unexamined evidence"):
+        contract.expire_incident(incident_id)
+
+
+# ---- C. an organizer-chosen host cannot override an independent authority
+def test_authority_figure_outranks_an_organizer_host_figure(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    mock_by_family(direct_vm, authority_fig=1500, ticketing_fig=5)
+    commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("b7" * 20), "SAFETY_AUTHORITY", GOV_URL)
+    commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("b8" * 20), "TICKETING_PLATFORM", TICKET_URL)
+    warp(direct_vm, RESOLVE_READY)
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(r"(?s).*VERIFIED SOURCE OCCUPANCY FIGURES: 1500\n.*", json.dumps(incident_result(consensus_occupancy=1500)))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)       # a 5 in the prompt would hit no mock and fail
+    assert contract.get_incident(incident_id)["outcome"] == "severe_overage"
+
+
+def test_organizer_host_figures_are_used_when_no_authority_source_exists(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    mock_by_family(direct_vm, authority_fig=1, ticketing_fig=1200)
+    commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("b9" * 20), "TICKETING_PLATFORM", TICKET_URL)
+    warp(direct_vm, RESOLVE_READY)
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(r"(?s).*VERIFIED SOURCE OCCUPANCY FIGURES: 1200\n.*", json.dumps(incident_result(consensus_occupancy=1200)))
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id)
+    assert contract.get_incident(incident_id)["outcome"] == "moderate_overage"
+
+
+# ---- D. host parsing cannot be tricked by characters a browser reads differently
+@pytest.mark.parametrize("url", [
+    "https://evil.com\\.gov/x",          # backslash is read as a slash by browsers
+    "https://evil.com%2f.gov/x",
+    "https://reports.safety.gov /x",
+    "https://rep\u043erts.safety.gov/x",  # cyrillic o
+])
+def test_ambiguous_host_characters_are_rejected(incident, direct_vm, url):
+    contract, event_id, incident_id = incident
+    reveal_expect_reject(contract, direct_vm, incident_id, "SAFETY_AUTHORITY", url, "illegal characters")
+
+
+# ---- E. a query string cannot make one page count as several sources
+def test_query_string_variants_are_the_same_source(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    first, second = bytes.fromhex("c1" * 20), bytes.fromhex("c2" * 20)
+    u1, u2 = "https://reports.safety.gov/r?x=1", "https://reports.safety.gov/r?x=2"
+    warp(direct_vm, NOW + 7200 + 100)
+    direct_vm.value = EVIDENCE_BOND
+    direct_vm.sender = first
+    e1 = contract.commit_evidence(incident_id, commitment(incident_id, as_hex(first), "SAFETY_AUTHORITY", u1))
+    direct_vm.sender = second
+    e2 = contract.commit_evidence(incident_id, commitment(incident_id, as_hex(second), "SAFETY_AUTHORITY", u2))
+    direct_vm.value = 0
+    warp(direct_vm, NOW + 7200 + 160)
+    direct_vm.sender = first
+    contract.reveal_evidence(e1, "SAFETY_AUTHORITY", u1, SALT)
+    direct_vm.sender = second
+    with pytest.raises(Exception, match="already submitted for this incident"):
+        contract.reveal_evidence(e2, "SAFETY_AUTHORITY", u2, SALT)
+
+
+# ---- fail-closed on an unreachable evidence host (checklist 16.3 #7)
+def test_unreachable_host_is_a_failure_marker_not_evidence(incident, direct_vm):
+    contract, event_id, incident_id = incident
+    direct_vm.clear_mocks()   # no web mock registered at all: the fetch cannot succeed
+    direct_vm.mock_llm(r"(?s).*fetch failed: unreachable or errored.*",
+                       json.dumps(source_result(same_event=False, reports_figure=False, occupancy_figure=0)))
+    ev = commit_and_reveal(contract, direct_vm, incident_id, bytes.fromhex("d7" * 20), "SAFETY_AUTHORITY", GOV_URL)
+    assert contract.get_evidence(ev)["status"] == "MISMATCHED"
+    warp(direct_vm, RESOLVE_READY)
+    direct_vm.sender = COMPLAINANT
+    contract.resolve_incident(incident_id) if int(contract.get_incident(incident_id)["verified_count"]) else contract.expire_incident(incident_id)
+    rec = contract.get_incident(incident_id)
+    assert rec["outcome"] == "unverifiable" and rec["slash_bps"] == "0"      # fail-closed: no slash on missing evidence
+    assert int(contract.get_credit(as_hex(COMPLAINANT))) == FILING_BOND
