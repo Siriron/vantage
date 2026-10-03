@@ -72,8 +72,7 @@ Occupancy ratio vs. the locked capacity limit maps to one of five outcomes: `no_
 
 | Network | Address | Explorer |
 |---|---|---|
-| StudioNet (v1, superseded) | `0x5F631527DAeeAB4742C4924a8220cBF3Ed3c44e8` | [View](https://explorer-studio.genlayer.com/address/0x5F631527DAeeAB4742C4924a8220cBF3Ed3c44e8) |
-| StudioNet (v2) | `0xf8b9EA8d53481f18A6514784E86e001bCA38cbeC` | [View](https://explorer-studio.genlayer.com/address/0xf8b9EA8d53481f18A6514784E86e001bCA38cbeC) |
+| StudioNet | `0xf8b9EA8d53481f18A6514784E86e001bCA38cbeC` | [View](https://explorer-studio.genlayer.com/address/0xf8b9EA8d53481f18A6514784E86e001bCA38cbeC) |
 
 </div>
 
