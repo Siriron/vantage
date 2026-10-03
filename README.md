@@ -46,9 +46,9 @@ Vantage lets an event organizer lock a maximum occupancy limit and post a compli
 
 ## How it works
 
-1. Organizer registers an event: venue, date, capacity limit, and a bond (0.001–5 GEN) — locked before the event happens.
-2. After the event, anyone opens one incident citing what's being alleged, with an evidence window.
-3. Evidence sources are committed as a hash, then revealed after the commit deadline.
+1. Organizer registers an event: venue, date, capacity limit, the ticketing and venue hosts evidence may come from, and a bond (0.001–5 GEN) — all locked before the event happens. The bond stays locked until 7 days after the event starts.
+2. After the event starts, anyone except the organizer opens one incident (with a filing bond) citing what's being alleged, with an evidence window.
+3. Evidence sources are committed as a hash, then revealed; at reveal each source host is authenticated and duplicates are rejected.
 4. **First consensus round** (`examine_source`): independently checks each revealed source's event-identity, source-family match, and reported occupancy figure.
 5. **Second consensus round** (`resolve_incident`): adjudicates the incident from verified sources against the locked capacity, using a graded overage-severity ladder.
 
@@ -58,7 +58,7 @@ Vantage lets an event organizer lock a maximum occupancy limit and post a compli
 <summary><b>The graded overage ladder</b></summary>
 <br />
 
-Occupancy ratio vs. the locked capacity limit maps to one of five outcomes: `no_breach` (0% slash), `mild_overage` (≤10% over, 15% slash), `moderate_overage` (10–30% over, 40% slash), `severe_overage` (>30% over, 80% slash), or `unverifiable` (no resolvable figure, 0% slash). Validator agreement uses ordinal distance on the ladder — one adjacent rung tolerated, a wide swing rejected — rather than flat equality or a raw numeric tolerance band.
+Occupancy ratio vs. the locked capacity limit maps to one of five outcomes: `no_breach` (0% slash), `mild_overage` (≤10% over, 15% slash), `moderate_overage` (10–30% over, 40% slash), `severe_overage` (>30% over, 80% slash), or `unverifiable` (no resolvable figure, 0% slash). Validators must agree on the outcome exactly, since each rung pays out differently; model variance is absorbed one stage earlier by a proportional tolerance on each source's reported figure.
 
 </details>
 
@@ -72,7 +72,8 @@ Occupancy ratio vs. the locked capacity limit maps to one of five outcomes: `no_
 
 | Network | Address | Explorer |
 |---|---|---|
-| StudioNet | `0x5F631527DAeeAB4742C4924a8220cBF3Ed3c44e8` | [View](https://explorer-studio.genlayer.com/address/0x5F631527DAeeAB4742C4924a8220cBF3Ed3c44e8) |
+| StudioNet (v1, superseded) | `0x5F631527DAeeAB4742C4924a8220cBF3Ed3c44e8` | [View](https://explorer-studio.genlayer.com/address/0x5F631527DAeeAB4742C4924a8220cBF3Ed3c44e8) |
+| StudioNet (v2) | `0xf8b9EA8d53481f18A6514784E86e001bCA38cbeC` | [View](https://explorer-studio.genlayer.com/address/0xf8b9EA8d53481f18A6514784E86e001bCA38cbeC) |
 
 </div>
 
@@ -124,7 +125,7 @@ LICENSE                     MIT
 
 </div>
 
-36 direct-mode tests execute the real contract under the pinned GenVM SDK runner and all pass — every write method, every graded-ladder outcome, HTTP-error handling, prompt-injection wrapping, validator agreement/rejection, bounded exits, and storage-pickling safety. `genvm-lint check` passes with zero errors. The frontend has a clean, real TypeScript compile (`npx tsc --noEmit`) and a clean production build (`npx vite build`) against the actual dependency tree. **Not yet proven:** real LLM behavior on genuine evidence documents, real network fetch behavior, real multi-node consensus timing, and the frontend's live transaction flow against an actual deployed contract — none of this has been exercised yet. See [`docs/deployment.md`](./docs/deployment.md) for the complete, itemized testing-status breakdown.
+88 direct-mode tests execute the real contract under the pinned GenVM SDK runner and all pass — every write method, every graded-ladder outcome, HTTP-error handling, prompt-injection wrapping, validator agreement/rejection, bounded exits, storage-pickling safety, and each steward-requested safeguard (bond lock, self-filing and self-evidence blocks, filing-bond outcomes, source authentication, deduplication, protocol pool, exact outcome agreement; mapped in [`docs/REVIEW_RESPONSE.md`](./docs/REVIEW_RESPONSE.md)). `genvm-lint check` passes with zero errors. The frontend has a clean, real TypeScript compile (`npx tsc --noEmit`) and a clean production build (`npx vite build`) against the actual dependency tree. **Not yet proven:** real LLM behavior on genuine evidence documents, real network fetch behavior, real multi-node consensus timing, and the v2 contract and frontend running together live — v2 has not been deployed yet. See [`docs/deployment.md`](./docs/deployment.md) for the complete, itemized testing-status breakdown.
 
 <br />
 
