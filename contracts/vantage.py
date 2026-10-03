@@ -33,10 +33,15 @@ lookup no one has an incentive to distort.
 EVIDENCE BINDING (Test 2, Rule 0.7 + Rule 0.8)
 -----------------------------------------------
 Every evidence submission declares one of a fixed set of source
-families (SAFETY_AUTHORITY, VENUE_CERTIFICATE, TICKETING_PLATFORM,
-INDEPENDENT_PRESS) and a source URL revealed only after commit —
-never a submitter-authored claim taken at face value. The event's
-venue name, event date, and locked capacity are frozen at
+families (SAFETY_AUTHORITY, VENUE_CERTIFICATE, TICKETING_PLATFORM) and
+a source URL revealed only after commit. At reveal the URL host is
+authenticated deterministically (no LLM): SAFETY_AUTHORITY must be a
+government domain; VENUE_CERTIFICATE and TICKETING_PLATFORM must sit
+on the venue / ticketing host the organizer locked at registration
+(before any dispute existed); IP literals, ports and credentials are
+rejected. A canonical-URL key per incident rejects the same source
+submitted twice. The event's venue name, event date, hosts, and
+locked capacity are frozen at
 register_event time, before any incident can exist, so nothing about
 what's being checked can be reshaped once a dispute is live (mirrors
 Recourse's spec-locking principle). Per-source examination
@@ -49,6 +54,28 @@ compares that re-derived occupancy figure against the locked capacity
 limit using a fixed tolerance-banded overage ladder — never a raw
 number the LLM is free to invent, and never a text-only severity
 label divorced from the actual locked numeric threshold.
+
+ANTI-FARMING AND BOND RULES (v2, after steward review):
+  - The organizer's bond stays locked until event start + 7 days
+    (CHALLENGE_WINDOW_SECONDS); close_event cannot pull it earlier, and
+    incidents can only be filed inside that window.
+  - The organizer can neither file an incident against, nor submit
+    evidence on, their own event. no_breach carries +0 reputation, so
+    there is no positive-reputation farming path through any wallet.
+  - A complainant posts a filing bond. Upheld or unprovable -> refunded;
+    adjudicated no_breach -> forfeited to the organizer.
+  - A slash splits 70% complainant / 30% protocol pool; the pool never
+    returns to the organizer and is withdrawable only by the treasury
+    (the deployer) via claim_protocol_pool().
+  - Validators must agree EXACTLY on the ladder outcome
+    (_OUTCOME_TOLERANCE_RUNGS = 0), because each rung carries a
+    different slash. Model variance is absorbed one stage earlier, by
+    the proportional tolerance on each source's reported figure.
+  - Residual risk, stated plainly: an organizer-controlled host is, by
+    construction, a source the organizer chose before any dispute; an
+    organizer sock puppet can publish there. Such a source only adds a
+    conflicting figure, which resolves to unverifiable (no slash), and
+    it spends the puppet's evidence bond.
 
 VERDICT LADDER — reachability traced against leader_fn before writing
 any adjudication code (Rule 11):
@@ -92,7 +119,9 @@ project, applied without exception:
      case hex) identically at every write and read site.
  11. Pull-based settlement: resolution credits a balance; a separate
      claim() method transfers.
- 12. Graded-ladder ordinal-distance agreement, per _outcomes_agree().
+ 12. Graded-ladder agreement via _outcomes_agree(): ordinal distance with
+     _OUTCOME_TOLERANCE_RUNGS = 0, i.e. exact agreement, because every rung
+     carries a different slash.
 
 DELIBERATE GAPS, STATED EXPLICITLY:
   - No automatic expiry sweep for an incident whose evidence deadline
@@ -133,6 +162,10 @@ MAX_BASIS_LEN = 800
 MIN_BASIS_LEN = 20
 
 MIN_BOND = 10 ** 15          # 0.001 GEN
+MIN_INCIDENT_BOND = 10 ** 15  # complainant's filing bond, 0.001 GEN
+MAX_INCIDENT_BOND = 10 ** 18
+CHALLENGE_WINDOW_SECONDS = 7 * 24 * 60 * 60  # organizer bond stays locked this long after event start
+PROTOCOL_POOL_KEY = "protocol_pool"          # credit key no wallet can claim as sender
 MAX_BOND = 5 * 10 ** 18      # 5 GEN
 MIN_EVIDENCE_BOND = 10 ** 14
 MAX_EVIDENCE_BOND = 10 ** 17
@@ -143,11 +176,11 @@ MAX_EVIDENCE_DEADLINE_SECONDS = 7 * 24 * 60 * 60
 MIN_REVEAL_WINDOW_SECONDS = 5 * 60
 
 SOURCE_FAMILIES = (
-    "SAFETY_AUTHORITY",
-    "VENUE_CERTIFICATE",
-    "TICKETING_PLATFORM",
-    "INDEPENDENT_PRESS",
+    "SAFETY_AUTHORITY",     # host must be a government domain (deterministic label check)
+    "VENUE_CERTIFICATE",    # host must be the venue host the organizer locked at registration
+    "TICKETING_PLATFORM",   # host must be the ticketing host the organizer locked at registration
 )
+_GOV_LABELS = ("gov", "gob", "gouv", "govt", "mil")
 
 EVENT_ACTIVE = "ACTIVE"
 EVENT_CLOSED = "CLOSED"
@@ -179,13 +212,13 @@ _OUTCOME_SLASH_BPS = {
 }
 
 _OUTCOME_REPUTATION_DELTA = {
-    "no_breach": 1,
+    "no_breach": 0,
     "mild_overage": -2,
     "moderate_overage": -5,
     "severe_overage": -10,
 }
 
-_OUTCOME_TOLERANCE_RUNGS = 1
+_OUTCOME_TOLERANCE_RUNGS = 0  # each rung carries a different slash: validators must agree exactly
 _UNVERIFIABLE = "unverifiable"
 
 _MILD_RATIO_CEILING = 110    # occupancy_ratio_bps <= this -> mild ceiling (110% of capacity)
@@ -260,6 +293,82 @@ def _url_field(value) -> str:
     cleaned = _text_field(value, "source url", MAX_URL)
     _require(not cleaned.startswith("https://"), "[EXPECTED] source url must use https")
     return cleaned
+
+
+def _host_field(value, name) -> str:
+    cleaned = _text_field(value, name, 253).lower()
+    _require("/" in cleaned or ":" in cleaned or "@" in cleaned or " " in cleaned, f"[EXPECTED] {name} must be a bare hostname")
+    _require("." not in cleaned or cleaned.startswith(".") or cleaned.endswith("."), f"[EXPECTED] {name} must be a valid hostname")
+    _require(_is_ip_or_local(cleaned), f"[EXPECTED] {name} cannot be an IP address or local host")
+    return cleaned
+
+
+def _is_ip_or_local(host) -> bool:
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
+        return True
+    labels = host.split(".")
+    return all(label.isdigit() for label in labels)
+
+
+def _url_host(url) -> str:
+    rest = url[len("https://"):]
+    authority = rest.split("/")[0].split("?")[0].split("#")[0]
+    return authority
+
+
+def _canonical_url(url) -> str:
+    """lowercase scheme+host, drop fragment, query and trailing slash, so trivially
+    different spellings of one source dedupe to one key. Duplicates matter because
+    repeated identical figures would otherwise read as a 'majority' to the adjudicator."""
+    base = url.split("#")[0].split("?")[0]   # fragment and query never make a different source
+    rest = base[len("https://"):]
+    host, sep, path = rest.partition("/")
+    canon = "https://" + host.lower() + (sep + path if sep else "")
+    while canon.endswith("/") and len(canon) > len("https://x"):
+        canon = canon[:-1]
+    return canon
+
+
+def _is_government_host(host) -> bool:
+    """gov / mil as the top-level domain, or a government label sitting directly under a
+    two-letter country TLD (gov.uk, gouv.fr, gob.mx). A government label anywhere else
+    (gov.evil.com) does not count."""
+    labels = host.split(".")
+    if len(labels) < 2:
+        return False
+    last = labels[-1]
+    if last in ("gov", "mil"):
+        return True
+    return len(last) == 2 and labels[-2] in _GOV_LABELS
+
+
+def _host_matches(host, allowed) -> bool:
+    return host == allowed or host.endswith("." + allowed)
+
+
+def _has_ambiguous_characters(url) -> bool:
+    """Characters that different URL parsers read differently (backslash is a slash to a
+    browser), non-ASCII lookalikes, whitespace/control characters, or percent-encoding
+    inside the authority. A host check is only meaningful if every parser agrees on the host."""
+    for ch in url:
+        if ch == "\\" or ord(ch) <= 32 or ord(ch) > 126:
+            return True
+    return "%" in _url_host(url)
+
+
+def _authenticate_source(family, url, event) -> None:
+    """Deterministic source authentication (no LLM): the URL host must be
+    structurally tied to something locked before the dispute existed."""
+    _require(_has_ambiguous_characters(url), "[EXPECTED] source url contains illegal characters")
+    host = _url_host(url).lower()
+    _require("@" in host or ":" in host, "[EXPECTED] source url must not contain credentials or a port")
+    _require(_is_ip_or_local(host), "[EXPECTED] source url cannot be an IP address or local host")
+    if family == "SAFETY_AUTHORITY":
+        _require(not _is_government_host(host), "[EXPECTED] SAFETY_AUTHORITY source must be a government domain")
+    elif family == "TICKETING_PLATFORM":
+        _require(not _host_matches(host, event.ticketing_host), "[EXPECTED] source is not the ticketing host locked at registration")
+    else:
+        _require(not _host_matches(host, event.venue_host), "[EXPECTED] source is not the venue host locked at registration")
 
 
 def _family(value) -> str:
@@ -370,6 +479,13 @@ def _split_list(joined) -> list:
     if not joined:
         return []
     return joined.split("\u241e")
+
+
+def _figure_within(figures, occupancy) -> bool:
+    """The adjudicator may choose among what verified sources reported, never invent a number."""
+    if not figures:
+        return False
+    return min(figures) <= occupancy <= max(figures)
 
 
 def _outcomes_agree(leader_outcome, my_outcome) -> bool:
@@ -511,6 +627,8 @@ class Event:
     organizer: Address
     venue_name: str
     event_date_label: str
+    ticketing_host: str
+    venue_host: str
     event_start_unix: u64
     capacity_limit: u32
     bond_atto: u256
@@ -527,6 +645,7 @@ class Incident:
     incident_id: str
     event_id: str
     complainant: Address
+    complainant_bond_atto: u256
     summary: str
     status: str
     opened_at: u64
@@ -586,6 +705,11 @@ class Vantage(gl.Contract):
     evidence_escrow: u256
     total_claimable: u256
     total_withdrawn: u256
+    incident_escrow: u256
+    treasury: Address
+    evidence_url_keys: TreeMap[str, bool]
+    last_event_by: TreeMap[str, str]
+    last_evidence_by: TreeMap[str, str]
 
     def __init__(self):
         self.next_event = u64(1)
@@ -596,6 +720,8 @@ class Vantage(gl.Contract):
         self.evidence_escrow = u256(0)
         self.total_claimable = u256(0)
         self.total_withdrawn = u256(0)
+        self.incident_escrow = u256(0)
+        self.treasury = gl.message.sender_address
 
     # ------------------------------------------------------------------
     # internal accessors
@@ -613,13 +739,37 @@ class Vantage(gl.Contract):
         _require(evidence_id not in self.evidence, "[EXPECTED] evidence not found")
         return self.evidence[evidence_id]
 
-    def _credit(self, recipient: Address, amount: int) -> None:
+    def _credit_key(self, key: str, amount: int) -> None:
         if amount <= 0:
             return
-        key = _addr_key(recipient)
         current = int(self.credits[key]) if key in self.credits else 0
         self.credits[key] = u256(current + amount)
         self.total_claimable = u256(int(self.total_claimable) + amount)
+
+    def _credit(self, recipient: Address, amount: int) -> None:
+        self._credit_key(_addr_key(recipient), amount)
+
+    def _has_unexamined_evidence(self, incident: Incident) -> bool:
+        for index in range(int(incident.evidence_count)):
+            evidence_id = self.incident_evidence_ids[self._index_key(incident.incident_id, index)]
+            if self.evidence[evidence_id].status == EVIDENCE_REVEALED:
+                return True
+        return False
+
+    def _release_filing_bond(self, incident: Incident, refund_to_complainant: bool) -> None:
+        """Move the complainant's filing bond out of incident escrow exactly once.
+        Refund when the incident was upheld or nothing could be proven; forfeit to the
+        organizer when evidence-backed adjudication found no breach."""
+        bond = int(incident.complainant_bond_atto)
+        if bond <= 0:
+            return
+        incident.complainant_bond_atto = u256(0)
+        self.incident_escrow = u256(int(self.incident_escrow) - bond)
+        if refund_to_complainant:
+            self._credit(incident.complainant, bond)
+        else:
+            event = self._event(incident.event_id)
+            self._credit(event.organizer, bond)
 
     def _bump_reputation(self, organizer: Address, delta: int) -> None:
         key = _addr_key(organizer)
@@ -640,9 +790,13 @@ class Vantage(gl.Contract):
         event_date_label: str,
         event_start_unix: u64,
         capacity_limit: u32,
+        ticketing_host: str,
+        venue_host: str,
     ) -> str:
         venue_name = _text_field(venue_name, "venue name", 200)
         event_date_label = _text_field(event_date_label, "event date label", 60)
+        ticketing_host = _host_field(ticketing_host, "ticketing host")
+        venue_host = _host_field(venue_host, "venue host")
         start = int(event_start_unix)
         now = _now_epoch_seconds()
         _require(now > 0 and start <= now, "[EXPECTED] event start must be in the future")
@@ -658,6 +812,8 @@ class Vantage(gl.Contract):
             organizer=gl.message.sender_address,
             venue_name=venue_name,
             event_date_label=event_date_label,
+            ticketing_host=ticketing_host,
+            venue_host=venue_host,
             event_start_unix=u64(start),
             capacity_limit=u32(capacity),
             bond_atto=u256(bond),
@@ -669,6 +825,7 @@ class Vantage(gl.Contract):
         )
         self.events[event_id] = item
         self.event_ids.append(event_id)
+        self.last_event_by[_addr_key(gl.message.sender_address)] = event_id
         self.total_deposited = u256(int(self.total_deposited) + bond)
         self.event_escrow = u256(int(self.event_escrow) + bond)
         return event_id
@@ -679,6 +836,10 @@ class Vantage(gl.Contract):
         _require(gl.message.sender_address != event.organizer, "[EXPECTED] only organizer can close")
         _require(event.status != EVENT_ACTIVE, "[EXPECTED] event is not active")
         _require(event.active_incident_id != "", "[EXPECTED] active incident blocks closing")
+        _require(
+            _now_epoch_seconds() < int(event.event_start_unix) + CHALLENGE_WINDOW_SECONDS,
+            "[EXPECTED] bond is locked until the challenge window ends",
+        )
         bond = int(event.bond_atto)
         event.status = EVENT_CLOSED
         event.closed_at = u64(_now_epoch_seconds())
@@ -690,12 +851,19 @@ class Vantage(gl.Contract):
     # incidents
     # ------------------------------------------------------------------
 
-    @gl.public.write
+    @gl.public.write.payable
     def open_incident(self, event_id: str, summary: str, evidence_deadline_seconds: u64) -> str:
         event = self._event(event_id)
         _require(event.status != EVENT_ACTIVE, "[EXPECTED] event is not active")
+        _require(gl.message.sender_address == event.organizer, "[EXPECTED] organizer cannot file an incident against own event")
         now = _now_epoch_seconds()
         _require(now <= int(event.event_start_unix), "[EXPECTED] event has not happened yet")
+        _require(
+            now >= int(event.event_start_unix) + CHALLENGE_WINDOW_SECONDS,
+            "[EXPECTED] challenge window has ended",
+        )
+        filing_bond = int(gl.message.value)
+        _require(filing_bond < MIN_INCIDENT_BOND or filing_bond > MAX_INCIDENT_BOND, "[EXPECTED] filing bond out of range")
         _require(event.active_incident_id != "", "[EXPECTED] another incident is already open for this event")
         summary = _text_field(summary, "incident summary", 300)
         window = int(evidence_deadline_seconds)
@@ -710,6 +878,7 @@ class Vantage(gl.Contract):
             incident_id=incident_id,
             event_id=event_id,
             complainant=gl.message.sender_address,
+            complainant_bond_atto=u256(filing_bond),
             summary=summary,
             status=INCIDENT_OPEN,
             opened_at=u64(now),
@@ -729,6 +898,8 @@ class Vantage(gl.Contract):
         event.active_incident_id = incident_id
         event.incident_count = u32(int(event.incident_count) + 1)
         self.events[event_id] = event
+        self.total_deposited = u256(int(self.total_deposited) + filing_bond)
+        self.incident_escrow = u256(int(self.incident_escrow) + filing_bond)
         return incident_id
 
     @gl.public.write
@@ -744,11 +915,13 @@ class Vantage(gl.Contract):
             "[EXPECTED] evidence window still open",
         )
         _require(int(incident.verified_count) != 0, "[EXPECTED] verified evidence exists — resolve instead")
+        _require(self._has_unexamined_evidence(incident), "[EXPECTED] unexamined evidence pending — examine it first")
         event = self._event(incident.event_id)
         incident.status = INCIDENT_EXPIRED
         incident.outcome = _UNVERIFIABLE
         incident.basis = "Evidence window expired without any verified source."
         incident.resolved_at = u64(_now_epoch_seconds())
+        self._release_filing_bond(incident, refund_to_complainant=True)
         self.incidents[incident_id] = incident
         if event.active_incident_id == incident_id:
             event.active_incident_id = ""
@@ -766,6 +939,11 @@ class Vantage(gl.Contract):
         _require(now >= int(incident.evidence_deadline), "[EXPECTED] evidence window has closed")
         _require(int(incident.evidence_count) >= MAX_EVIDENCE_PER_INCIDENT, "[EXPECTED] evidence capacity reached")
         _require(len(commitment) != 64, "[EXPECTED] commitment must be a 64-char hex digest")
+        event_for_commit = self._event(incident.event_id)
+        _require(
+            gl.message.sender_address == event_for_commit.organizer,
+            "[EXPECTED] organizer cannot submit evidence on own event",
+        )
         required_bond = MIN_EVIDENCE_BOND
         _require(int(gl.message.value) != required_bond, "[EXPECTED] send exact evidence bond")
 
@@ -792,6 +970,7 @@ class Vantage(gl.Contract):
             basis="",
         )
         self.evidence[evidence_id] = item
+        self.last_evidence_by[_addr_key(gl.message.sender_address) + "|" + incident_id] = evidence_id
         self.incident_evidence_ids[self._index_key(incident_id, int(incident.evidence_count))] = evidence_id
         incident.evidence_count = u32(int(incident.evidence_count) + 1)
         self.incidents[incident_id] = incident
@@ -814,6 +993,13 @@ class Vantage(gl.Contract):
             (item.incident_id + "|" + item.submitter.as_hex.lower() + "|" + source_family + "|" + source_url + "|" + salt).encode("utf-8")
         ).hexdigest()
         _require(expected != item.commitment, "[EXPECTED] reveal does not match commitment")
+
+        incident = self._incident(item.incident_id)
+        event = self._event(incident.event_id)
+        _authenticate_source(source_family, source_url, event)
+        dedupe_key = item.incident_id + "|" + _canonical_url(source_url).lower()
+        _require(dedupe_key in self.evidence_url_keys, "[EXPECTED] this source was already submitted for this incident")
+        self.evidence_url_keys[dedupe_key] = True
 
         item.source_family = source_family
         item.source_url = source_url
@@ -948,12 +1134,23 @@ class Vantage(gl.Contract):
         _require(int(incident.verified_count) == 0, "[EXPECTED] no verified evidence yet — expire instead")
         event = self._event(incident.event_id)
 
-        verified_figures = []
+        _require(self._has_unexamined_evidence(incident), "[EXPECTED] unexamined evidence pending — examine it first")
+
+        # Source precedence, deterministic: a figure from an independent government source
+        # outranks figures from hosts the organizer chose. Organizer-chosen hosts only count
+        # when no authority source reported a figure, so a sock puppet publishing on the
+        # locked host cannot override (or block) an authority's figure.
+        authority_figures = []
+        other_figures = []
         for index in range(int(incident.evidence_count)):
             evidence_id = self.incident_evidence_ids[self._index_key(incident_id, index)]
             candidate = self.evidence[evidence_id]
             if candidate.status == EVIDENCE_VERIFIED and candidate.reports_figure:
-                verified_figures.append(int(candidate.occupancy_figure))
+                if candidate.source_family == "SAFETY_AUTHORITY":
+                    authority_figures.append(int(candidate.occupancy_figure))
+                else:
+                    other_figures.append(int(candidate.occupancy_figure))
+        verified_figures = sorted(authority_figures if authority_figures else other_figures)
 
         incident_mem = gl.storage.copy_to_memory(incident)
         event_mem = gl.storage.copy_to_memory(event)
@@ -972,7 +1169,10 @@ class Vantage(gl.Contract):
                 'resolvable is true, else 0>, "basis": "<short, evidence-grounded>"}'
             )
             result = gl.nondet.exec_prompt(prompt, response_format="json")
-            return _incident_result(result)
+            parsed = _incident_result(result)
+            if parsed["resolvable"] and not _figure_within(figures_mem, parsed["consensus_occupancy"]):
+                raise gl.vm.UserError("[LLM_ERROR] consensus figure outside the verified range")
+            return parsed
 
         def validator_fn(leaders_res) -> bool:
             if not isinstance(leaders_res, gl.vm.Return):
@@ -993,6 +1193,8 @@ class Vantage(gl.Contract):
                 my_occ = my_data.get("consensus_occupancy", -1)
                 if leader_occ < 0 or my_occ < 0:
                     return False
+                if not _figure_within(figures_mem, leader_occ):
+                    return False
                 leader_outcome = _ratio_to_outcome((leader_occ * 10000) // capacity_mem)
                 my_outcome = _ratio_to_outcome((my_occ * 10000) // capacity_mem)
                 if not _outcomes_agree(leader_outcome, my_outcome):
@@ -1002,7 +1204,15 @@ class Vantage(gl.Contract):
                 return False
             return True
 
-        result = _incident_result(gl.vm.run_nondet_unsafe(leader_fn, validator_fn))
+        if figures_mem:
+            result = _incident_result(gl.vm.run_nondet_unsafe(leader_fn, validator_fn))
+        else:
+            # verified sources reported no usable figure: nothing for a model to adjudicate
+            result = {
+                "resolvable": False,
+                "consensus_occupancy": -1,
+                "basis": "Verified sources reported no usable occupancy figure.",
+            }
 
         if result["resolvable"]:
             ratio_bps = (result["consensus_occupancy"] * 10000) // capacity_mem
@@ -1034,7 +1244,14 @@ class Vantage(gl.Contract):
             complainant_share = (slash_amount * 7000) // 10000
             protocol_share = slash_amount - complainant_share
             self._credit(incident.complainant, complainant_share)
-            self._credit(event.organizer, protocol_share)  # protocol pool placeholder: credited back to organizer's own escrow accounting until a dedicated pool address is set — see docs
+            # the protocol share never returns to the organizer: it goes to a separate pool
+            # that only the contract's treasury address can withdraw (claim_protocol_pool)
+            self._credit_key(PROTOCOL_POOL_KEY, protocol_share)
+
+        # filing bond: refunded when the incident was upheld or could not be proven either
+        # way; forfeited to the organizer only when evidence-backed adjudication found no breach
+        self._release_filing_bond(incident, refund_to_complainant=(outcome != "no_breach"))
+        self.incidents[incident_id] = incident
 
         event.active_incident_id = ""
         self.events[event.event_id] = event
@@ -1056,6 +1273,17 @@ class Vantage(gl.Contract):
         gl.get_contract_at(gl.message.sender_address).emit_transfer(value=u256(amount))
         return json.dumps({"claimed": str(amount)})
 
+    @gl.public.write
+    def claim_protocol_pool(self) -> str:
+        _require(gl.message.sender_address != self.treasury, "[EXPECTED] only the treasury can claim the protocol pool")
+        amount = int(self.credits[PROTOCOL_POOL_KEY]) if PROTOCOL_POOL_KEY in self.credits else 0
+        _require(amount <= 0, "[EXPECTED] protocol pool is empty")
+        self.credits[PROTOCOL_POOL_KEY] = u256(0)
+        self.total_claimable = u256(int(self.total_claimable) - amount)
+        self.total_withdrawn = u256(int(self.total_withdrawn) + amount)
+        gl.get_contract_at(gl.message.sender_address).emit_transfer(value=u256(amount))
+        return json.dumps({"claimed": str(amount)})
+
     # ------------------------------------------------------------------
     # views
     # ------------------------------------------------------------------
@@ -1068,6 +1296,8 @@ class Vantage(gl.Contract):
             "organizer": e.organizer.as_hex,
             "venue_name": e.venue_name,
             "event_date_label": e.event_date_label,
+            "ticketing_host": e.ticketing_host,
+            "venue_host": e.venue_host,
             "event_start_unix": str(int(e.event_start_unix)),
             "capacity_limit": str(int(e.capacity_limit)),
             "bond_atto": str(int(e.bond_atto)),
@@ -1083,6 +1313,7 @@ class Vantage(gl.Contract):
             "incident_id": i.incident_id,
             "event_id": i.event_id,
             "complainant": i.complainant.as_hex,
+            "complainant_bond_atto": str(int(i.complainant_bond_atto)),
             "summary": i.summary,
             "status": i.status,
             "opened_at": str(int(i.opened_at)),
@@ -1115,6 +1346,19 @@ class Vantage(gl.Contract):
         }
 
     @gl.public.view
+    def get_last_event(self, creator_address: str) -> str:
+        """The id of the event this wallet most recently registered ('' if none).
+        Keyed by creator, so it is unaffected by other wallets creating events."""
+        key = creator_address.strip().lower()
+        return self.last_event_by[key] if key in self.last_event_by else ""
+
+    @gl.public.view
+    def get_last_evidence(self, submitter_address: str, incident_id: str) -> str:
+        """The id of the evidence this wallet most recently committed on an incident."""
+        key = submitter_address.strip().lower() + "|" + incident_id
+        return self.last_evidence_by[key] if key in self.last_evidence_by else ""
+
+    @gl.public.view
     def get_reputation(self, organizer_address: str) -> dict:
         key = organizer_address.strip().lower()
         score = int(self.reputation[key]) if key in self.reputation else 0
@@ -1128,15 +1372,19 @@ class Vantage(gl.Contract):
     @gl.public.view
     def get_stats(self) -> dict:
         balanced = int(self.total_deposited) == (
-            int(self.event_escrow) + int(self.evidence_escrow) + int(self.total_claimable) + int(self.total_withdrawn)
+            int(self.event_escrow) + int(self.evidence_escrow) + int(self.incident_escrow)
+            + int(self.total_claimable) + int(self.total_withdrawn)
         )
         return {
             "product": "Vantage",
+            "treasury": self.treasury.as_hex,
             "events": str(len(self.event_ids)),
             "incidents": str(len(self.incident_ids)),
             "total_deposited_atto": str(int(self.total_deposited)),
             "event_escrow_atto": str(int(self.event_escrow)),
             "evidence_escrow_atto": str(int(self.evidence_escrow)),
+            "incident_escrow_atto": str(int(self.incident_escrow)),
+            "protocol_pool_atto": str(int(self.credits[PROTOCOL_POOL_KEY]) if PROTOCOL_POOL_KEY in self.credits else 0),
             "claimable_atto": str(int(self.total_claimable)),
             "withdrawn_atto": str(int(self.total_withdrawn)),
             "accounting_balanced": balanced,
