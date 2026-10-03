@@ -3,6 +3,8 @@ export interface EventRecord {
   organizer: string;
   venue_name: string;
   event_date_label: string;
+  ticketing_host: string;
+  venue_host: string;
   event_start_unix: string;
   capacity_limit: string;
   bond_atto: string;
@@ -15,6 +17,7 @@ export interface IncidentRecord {
   incident_id: string;
   event_id: string;
   complainant: string;
+  complainant_bond_atto: string;
   summary: string;
   status: 'OPEN' | 'RESOLVED' | 'EXPIRED';
   opened_at: string;
@@ -33,7 +36,7 @@ export interface EvidenceRecord {
   evidence_id: string;
   incident_id: string;
   submitter: string;
-  source_family: 'SAFETY_AUTHORITY' | 'VENUE_CERTIFICATE' | 'TICKETING_PLATFORM' | 'INDEPENDENT_PRESS' | '';
+  source_family: 'SAFETY_AUTHORITY' | 'VENUE_CERTIFICATE' | 'TICKETING_PLATFORM' | '';
   source_url: string;
   status: 'COMMITTED' | 'REVEALED' | 'VERIFIED' | 'MISMATCHED' | 'SOURCE_UNAVAILABLE' | 'UNREVEALED';
   same_event: boolean;
@@ -45,11 +48,14 @@ export interface EvidenceRecord {
 
 export interface StatsRecord {
   product: string;
+  treasury: string;
   events: string;
   incidents: string;
   total_deposited_atto: string;
   event_escrow_atto: string;
   evidence_escrow_atto: string;
+  incident_escrow_atto: string;
+  protocol_pool_atto: string;
   claimable_atto: string;
   withdrawn_atto: string;
   accounting_balanced: boolean;
@@ -60,7 +66,6 @@ export const SOURCE_FAMILIES = [
   'SAFETY_AUTHORITY',
   'VENUE_CERTIFICATE',
   'TICKETING_PLATFORM',
-  'INDEPENDENT_PRESS',
 ] as const;
 
 export const OUTCOME_LABELS: Record<string, string> = {
