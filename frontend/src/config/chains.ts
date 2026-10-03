@@ -6,7 +6,7 @@ export const EXPLORER_URL = 'https://explorer-studio.genlayer.com';
 
 // Single plain constant. Update this one line after deploying via
 // studio.genlayer.com — no .env, no dashboard, no build-time indirection.
-export const CONTRACT_ADDRESS = '0x5F631527DAeeAB4742C4924a8220cBF3Ed3c44e8';
+export const CONTRACT_ADDRESS = '0xf8b9EA8d53481f18A6514784E86e001bCA38cbeC';
 
 export const STUDIONET_CONFIG = {
   chainId: CHAIN_ID_HEX,
