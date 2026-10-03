@@ -6,20 +6,21 @@ Contract: `contracts/vantage.py`. Pinned dependency: `py-genlayer:1jb45aa8ynh2a9
 
 | Method | Who calls it | What it does |
 |---|---|---|
-| `register_event(venue_name, event_date_label, event_start_unix, capacity_limit)` — payable | Organizer | Locks venue, date, capacity, and a bond (0.001–5 GEN) before the event happens. |
-| `close_event(event_id)` | Organizer | Reclaims the remaining bond once the event has no open incident. |
-| `open_incident(event_id, summary, evidence_deadline_seconds)` | Anyone | Opens one compliance check against a past event; sets the evidence-commit window (15 min – 7 days). |
+| `register_event(venue_name, event_date_label, event_start_unix, capacity_limit, ticketing_host, venue_host)` — payable | Organizer | Locks venue, date, capacity, the two evidence hosts, and a bond (0.001–5 GEN) before the event happens. |
+| `close_event(event_id)` | Organizer | Reclaims the remaining bond, only after event start + 7 days and with no open incident. |
+| `open_incident(event_id, summary, evidence_deadline_seconds)` — payable | Anyone except the organizer | Opens one compliance check against a started event, inside the 7-day challenge window, with a filing bond (0.001–1 GEN); sets the evidence-commit window (15 min – 7 days). |
 | `expire_incident(incident_id)` | Anyone | Closes an incident as `unverifiable` if the full evidence + reveal window elapsed with no verified source. |
-| `commit_evidence(incident_id, commitment)` — payable | Anyone | Commits `sha256(incident_id | submitter | family | url | salt)` with a small evidence bond, before the commit deadline. |
+| `commit_evidence(incident_id, commitment)` — payable | Anyone except the organizer | Commits `sha256(incident_id | submitter | family | url | salt)` with a small evidence bond, before the commit deadline. |
 | `expire_unrevealed_evidence(evidence_id)` | Anyone | Returns an evidence bond to the organizer if a commitment was never revealed. |
-| `reveal_evidence(evidence_id, source_family, source_url, salt)` | The original submitter | Reveals the committed source; must match the stored hash exactly. |
+| `reveal_evidence(evidence_id, source_family, source_url, salt)` | The original submitter | Reveals the committed source; must match the stored hash, pass host authentication, and not duplicate an accepted source for this incident. |
 | `examine_source(evidence_id)` | Anyone | Triggers the first independent nondet round: fetches the source and judges event-identity, family match, and reported occupancy. |
 | `resolve_incident(incident_id)` | Anyone | Triggers the second independent nondet round: adjudicates the incident from verified sources against the locked capacity, applies the graded-ladder outcome. |
 | `claim()` | Anyone with a credited balance | Pull-based withdrawal of any credited GEN. |
+| `claim_protocol_pool()` | Treasury (deployer) only | Withdraws the 30% protocol share of slashes. |
 
 ## View methods
 
-`get_event`, `get_incident`, `get_evidence`, `get_reputation(address)`, `get_credit(address)`, `get_stats()` — all return JSON via `json.dumps()`.
+`get_event`, `get_incident`, `get_evidence`, `get_reputation(address)`, `get_credit(address)`, `get_stats()`, plus `get_last_event(creator)` and `get_last_evidence(submitter, incident_id)`. The last two return the id a wallet most recently created, keyed by that wallet, so a client never has to decode a transaction receipt or infer an id from a shared counter.
 
 ## Verdict-enum reachability trace
 
@@ -43,12 +44,12 @@ Every value is traced against a real `leader_fn` branch in the contract's own do
 6. `leader_fn`/`validator_fn` are nested functions in both nondet write methods; a real indentation-scoped scan confirms zero `self.` references in either body.
 7. `verified_families` (an array-shaped field on the `Incident` dataclass) is a delimiter-joined `str`, never a `DynArray` on a nested dataclass.
 8. Timestamps use the confirmed hand-rolled `_now_epoch_seconds()` parser throughout.
-9. Every field the verdict depends on — `same_event`, `family_matches`, `occupancy_figure` (with a proportional tolerance band, since it's a continuous reading rather than a discrete LLM choice), `resolvable`, and the outcome itself — is independently re-derived and compared in the corresponding `validator_fn`.
+9. Every field the verdict depends on — `same_event`, `family_matches`, `occupancy_figure` (with a proportional tolerance band, since it's a continuous reading rather than a discrete LLM choice), `resolvable`, and the outcome itself — is independently re-derived and compared in the corresponding `validator_fn`. The outcome is compared with zero tolerance because each rung carries a different slash.
 10. The `reputation` and `credits` TreeMaps are keyed by lowercase hex address (`_addr_key`), applied identically at every write and read site.
 
 ## Tests
 
-`tests/test_vantage.py` — 36 direct-mode tests executing the real contract under the pinned GenVM runner via `genlayer-test==0.29.2`. Covers every write method, every ladder outcome (parametrized), HTTP-error handling (the confirmed `.status`-vs-`.status_code` regression), prompt-injection wrapping, validator agreement and rejection (including ordinal-tolerance and wide-swing cases), bounded-exit paths, and storage-pickling safety (`check_pickling`).
+`tests/test_vantage.py` — 88 direct-mode tests executing the real contract under the pinned GenVM runner via `genlayer-test==0.29.2`. Covers every write method, every ladder outcome (parametrized), HTTP-error handling (the confirmed `.status`-vs-`.status_code` regression), prompt-injection wrapping, validator agreement and rejection (exact outcome agreement, same-rung agreement, out-of-range figures, wide swings), bounded-exit paths, and storage-pickling safety (`check_pickling`).
 
 Run with:
 ```bash
