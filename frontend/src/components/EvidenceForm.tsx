@@ -26,7 +26,7 @@ interface Props {
 const PENDING_KEY_PREFIX = 'vantage-pending-reveal:';
 
 export function EvidenceForm({ incidentId, account, onSubmitted }: Props) {
-  const { write } = useGenLayer();
+  const { write, read } = useGenLayer();
   const [family, setFamily] = useState<string>(SOURCE_FAMILIES[0]);
   const [url, setUrl] = useState('');
   const [phase, setPhase] = useState<'commit' | 'manual-id' | 'reveal'>('commit');
@@ -47,7 +47,16 @@ export function EvidenceForm({ incidentId, account, onSubmitted }: Props) {
       const salt = randomSalt();
       const commitment = await sha256Hex(`${incidentId}|${account.toLowerCase()}|${family}|${url}|${salt}`);
       const { returnValue } = await write('commit_evidence', [incidentId, commitment], BigInt(10 ** 14));
-      const newEvidenceId = typeof returnValue === 'string' ? returnValue : '';
+      let newEvidenceId = typeof returnValue === 'string' ? returnValue : '';
+      if (!newEvidenceId) {
+        // Read back the id the contract recorded for this wallet on this incident.
+        try {
+          const last = await read<string>('get_last_evidence', [account, incidentId]);
+          newEvidenceId = typeof last === 'string' ? last : '';
+        } catch {
+          newEvidenceId = '';
+        }
+      }
       if (newEvidenceId) {
         // Persist the reveal secret locally, keyed by the confirmed
         // evidence ID — only this browser/wallet can reveal, and losing
@@ -155,6 +164,11 @@ export function EvidenceForm({ incidentId, account, onSubmitted }: Props) {
           placeholder="https://fire-marshal.example.gov/reports/..."
         />
       </div>
+      <p className="label" style={{ marginBottom: 8 }}>
+        SAFETY AUTHORITY must be a government domain (.gov, gov.uk, gouv.fr…). VENUE CERTIFICATE and TICKETING
+        PLATFORM must be on the host the organizer locked at registration. The same source can only be
+        submitted once per incident.
+      </p>
       <p className="label" style={{ marginBottom: 12 }}>
         Your source stays hidden until you reveal it, so other submitters can&apos;t react to it first.
       </p>

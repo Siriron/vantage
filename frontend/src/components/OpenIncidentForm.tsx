@@ -10,6 +10,7 @@ export function OpenIncidentForm({ eventId, onOpened }: Props) {
   const { write } = useGenLayer();
   const [summary, setSummary] = useState('');
   const [windowMinutes, setWindowMinutes] = useState('60');
+  const [filingBond, setFilingBond] = useState('0.001');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +23,8 @@ export function OpenIncidentForm({ eventId, onOpened }: Props) {
     }
     setSubmitting(true);
     try {
-      await write('open_incident', [eventId, summary.trim(), parseInt(windowMinutes, 10) * 60]);
+      const value = BigInt(Math.round(parseFloat(filingBond) * 1e18));
+      await write('open_incident', [eventId, summary.trim(), parseInt(windowMinutes, 10) * 60], value);
       onOpened();
     } catch (err: any) {
       setError(err?.message ?? 'Could not open incident.');
@@ -51,6 +53,10 @@ export function OpenIncidentForm({ eventId, onOpened }: Props) {
           value={windowMinutes}
           onChange={(e) => setWindowMinutes(e.target.value)}
         />
+      </div>
+      <div className="field">
+        <label>Filing bond (GEN, 0.001–1) — refunded if the breach is upheld or cannot be proven; forfeited to the organizer if adjudicated no breach</label>
+        <input type="number" step="0.001" min="0.001" max="1" value={filingBond} onChange={(e) => setFilingBond(e.target.value)} />
       </div>
       {error && <p style={{ color: 'var(--hazard)', fontSize: 14 }}>{error}</p>}
       <button className="btn" type="submit" disabled={submitting}>

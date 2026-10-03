@@ -6,11 +6,13 @@ interface Props {
 }
 
 export function RegisterEventForm({ onRegistered }: Props) {
-  const { write } = useGenLayer();
+  const { write, read, account } = useGenLayer();
   const [venueName, setVenueName] = useState('');
   const [dateLabel, setDateLabel] = useState('');
   const [startDate, setStartDate] = useState('');
   const [capacity, setCapacity] = useState('');
+  const [ticketingHost, setTicketingHost] = useState('');
+  const [venueHost, setVenueHost] = useState('');
   const [bond, setBond] = useState('0.01');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -18,7 +20,7 @@ export function RegisterEventForm({ onRegistered }: Props) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    if (!venueName.trim() || !dateLabel.trim() || !startDate || !capacity) {
+    if (!venueName.trim() || !dateLabel.trim() || !startDate || !capacity || !ticketingHost.trim() || !venueHost.trim()) {
       setError('Fill in every field.');
       return;
     }
@@ -32,10 +34,20 @@ export function RegisterEventForm({ onRegistered }: Props) {
       const value = BigInt(Math.round(parseFloat(bond) * 1e18));
       const { returnValue } = await write(
         'register_event',
-        [venueName.trim(), dateLabel.trim(), startUnix, parseInt(capacity, 10)],
+        [venueName.trim(), dateLabel.trim(), startUnix, parseInt(capacity, 10), ticketingHost.trim().toLowerCase(), venueHost.trim().toLowerCase()],
         value
       );
-      const eventId = typeof returnValue === 'string' ? returnValue : '';
+      let eventId = typeof returnValue === 'string' ? returnValue : '';
+      if (!eventId && account) {
+        // Receipt decoding is not relied on: the contract records the last event each
+        // wallet registered, so read it back directly.
+        try {
+          const last = await read<string>('get_last_event', [account]);
+          eventId = typeof last === 'string' ? last : '';
+        } catch {
+          eventId = '';
+        }
+      }
       if (!eventId) {
         setError(
           'Registered successfully, but the new event ID could not be read automatically. Check the explorer for your transaction and use "Find an event" with the ID shown there.'
@@ -68,7 +80,15 @@ export function RegisterEventForm({ onRegistered }: Props) {
         <input type="number" min="1" value={capacity} onChange={(e) => setCapacity(e.target.value)} placeholder="1000" />
       </div>
       <div className="field">
-        <label>Compliance bond (GEN)</label>
+        <label>Ticketing host (locked now; ticketing evidence must come from it)</label>
+        <input value={ticketingHost} onChange={(e) => setTicketingHost(e.target.value)} placeholder="tickets.example.com" />
+      </div>
+      <div className="field">
+        <label>Venue host (locked now; venue certificate evidence must come from it)</label>
+        <input value={venueHost} onChange={(e) => setVenueHost(e.target.value)} placeholder="riversidearena.example.org" />
+      </div>
+      <div className="field">
+        <label>Compliance bond (GEN) — stays locked until 7 days after the event starts</label>
         <input type="number" step="0.001" min="0.001" max="5" value={bond} onChange={(e) => setBond(e.target.value)} />
       </div>
       {error && <p style={{ color: 'var(--hazard)', fontSize: 14 }}>{error}</p>}

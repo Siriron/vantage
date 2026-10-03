@@ -53,6 +53,21 @@ export function IncidentCard({ incidentId, account, onChanged }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incidentId]);
 
+  async function handleExamine(evidenceId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await write('examine_source', [evidenceId]);
+      const rec = await read<EvidenceRecord>('get_evidence', [evidenceId]);
+      setLookupResult(rec);
+      await load();
+    } catch (err: any) {
+      setError(err?.message ?? 'Examination failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleResolve() {
     setBusy(true);
     setError(null);
@@ -84,6 +99,10 @@ export function IncidentCard({ incidentId, account, onChanged }: Props) {
   if (!incident) return <p className="label">Loading incident…</p>;
 
   const deadlinePassed = now / 1000 >= parseInt(incident.evidence_deadline, 10);
+  // the contract only settles 15 minutes after the evidence window closes, so every
+  // commitment has had its reveal window (mirrors the +15*60 guard in resolve/expire)
+  const settleAt = parseInt(incident.evidence_deadline, 10) + 15 * 60;
+  const settleReady = now / 1000 >= settleAt;
   const isBreach = incident.outcome && incident.outcome !== 'no_breach' && incident.outcome !== 'unverifiable';
 
   return (
@@ -135,6 +154,16 @@ export function IncidentCard({ incidentId, account, onChanged }: Props) {
               <span className="num">{lookupResult.occupancy_figure !== '-1' ? lookupResult.occupancy_figure : '—'}</span>
             </div>
           )}
+          {lookupResult && lookupResult.status === 'REVEALED' && account && (
+            <div style={{ marginTop: 8 }}>
+              <p className="label">
+                Revealed but not examined yet. The incident cannot be settled until every revealed source is examined.
+              </p>
+              <button className="btn btn-outline" onClick={() => handleExamine(lookupResult.evidence_id)} disabled={busy}>
+                {busy ? 'Examining…' : 'Examine this source'}
+              </button>
+            </div>
+          )}
 
           {!deadlinePassed && account && (
             <div style={{ marginTop: 12 }}>
@@ -155,14 +184,21 @@ export function IncidentCard({ incidentId, account, onChanged }: Props) {
             </div>
           )}
 
+          {deadlinePassed && !settleReady && (
+            <div className="row">
+              <span className="label">Settlement opens in</span>
+              <span className="num">{countdown(settleAt, now)}</span>
+            </div>
+          )}
+
           {deadlinePassed && (
             <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
               {parseInt(incident.verified_count, 10) > 0 ? (
-                <button className="btn" onClick={handleResolve} disabled={busy}>
+                <button className="btn" onClick={handleResolve} disabled={busy || !settleReady}>
                   {busy ? 'Resolving…' : 'Resolve incident'}
                 </button>
               ) : (
-                <button className="btn btn-outline" onClick={handleExpire} disabled={busy}>
+                <button className="btn btn-outline" onClick={handleExpire} disabled={busy || !settleReady}>
                   {busy ? 'Expiring…' : 'Expire (no verified evidence)'}
                 </button>
               )}
